@@ -33,7 +33,6 @@ import org.apache.nifi.annotation.behavior.WritesAttributes;
 import org.apache.nifi.annotation.documentation.CapabilityDescription;
 import org.apache.nifi.annotation.documentation.Tags;
 import org.apache.nifi.cdc.CDCException;
-import org.apache.nifi.cdc.event.ColumnDefinition;
 import org.apache.nifi.cdc.event.RowEventException;
 import org.apache.nifi.cdc.event.TableInfo;
 import org.apache.nifi.cdc.event.TableInfoCacheKey;
@@ -75,10 +74,7 @@ import java.io.IOException;
 import java.net.ConnectException;
 import java.net.InetSocketAddress;
 import java.sql.Connection;
-import java.sql.ResultSet;
-import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
-import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -698,33 +694,5 @@ public class CaptureChangeMySQLGtid extends CaptureChangeMySQL {
       newStateMap.put(EventWriter.SEQUENCE_ID_KEY, String.valueOf(sequenceId));
       stateManager.setState(newStateMap, Scope.CLUSTER);
     }
-  }
-
-  /**
-   * Retrieves the column information for the specified database and table. The column information can be used to enrich CDC events coming from the RDBMS.
-   *
-   * @param key A TableInfoCacheKey reference, which contains the database and table names
-   * @return A TableInfo instance with the ColumnDefinitions provided (if retrieved successfully from the database)
-   */
-  protected TableInfo loadTableInfo(TableInfoCacheKey key) throws SQLException {
-    TableInfo tableInfo = null;
-    if (jdbcConnection != null) {
-      try (Statement s = jdbcConnection.createStatement()) {
-        s.execute("USE " + key.getDatabaseName());
-        ResultSet rs = s.executeQuery("SELECT * FROM " + key.getTableName() + " LIMIT 0");
-        ResultSetMetaData rsmd = rs.getMetaData();
-        int numCols = rsmd.getColumnCount();
-        List<ColumnDefinition> columnDefinitions = new ArrayList<>();
-        for (int i = 1; i <= numCols; i++) {
-          // Use the column label if it exists, otherwise use the column name. We're not doing aliasing here, but it's better practice.
-          String columnLabel = rsmd.getColumnLabel(i);
-          columnDefinitions.add(new ColumnDefinition(rsmd.getColumnType(i), columnLabel != null ? columnLabel : rsmd.getColumnName(i)));
-        }
-
-        tableInfo = new TableInfo(key.getDatabaseName(), key.getTableName(), key.getTableId(), columnDefinitions);
-      }
-    }
-
-    return tableInfo;
   }
 }
