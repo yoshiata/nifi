@@ -345,7 +345,7 @@ public class CaptureChangeMySQL extends AbstractSessionFactoryProcessor {
             .description("Specifies whether to use Global Transaction ID (GTID) for binlog tracking. When set to true, processor's state of binlog file name and position is ignored. "
                     + "By using GTID, when connecting to a MySQL cluster consisting of multiple hosts, even if the connected host goes down, "
                     + "the processor can automatically switch to other host and continue reading from the same binary log position.")
-            .required(false)
+            .required(true)
             .allowableValues("true", "false")
             .defaultValue("false")
             .addValidator(StandardValidators.BOOLEAN_VALIDATOR)
@@ -487,43 +487,45 @@ public class CaptureChangeMySQL extends AbstractSessionFactoryProcessor {
         includeDDLEvents = context.getProperty(INCLUDE_DDL_EVENTS).asBoolean();
         useGtid = context.getProperty(USE_GTID).asBoolean();
 
-        // Set current binlog filename to whatever is in State, falling back to the Retrieve All Records then Initial Binlog Filename if no State variable is present
-        currentBinlogFile = stateMap.get(BinlogEventInfo.BINLOG_FILENAME_KEY);
-        if (currentBinlogFile == null) {
-            if (!getAllRecords) {
-                if (context.getProperty(INIT_BINLOG_FILENAME).isSet()) {
-                    currentBinlogFile = context.getProperty(INIT_BINLOG_FILENAME).evaluateAttributeExpressions().getValue();
-                }
-            } else {
-                // If we're starting from the beginning of all binlogs, the binlog filename must be the empty string (not null)
-                currentBinlogFile = "";
-            }
-        }
-
-        // Set current binlog position to whatever is in State, falling back to the Retrieve All Records then Initial Binlog Filename if no State variable is present
-        String binlogPosition = stateMap.get(BinlogEventInfo.BINLOG_POSITION_KEY);
-        if (binlogPosition != null) {
-            currentBinlogPosition = Long.valueOf(binlogPosition);
-        } else if (!getAllRecords) {
-            if (context.getProperty(INIT_BINLOG_POSITION).isSet()) {
-                currentBinlogPosition = context.getProperty(INIT_BINLOG_POSITION).evaluateAttributeExpressions().asLong();
-            } else {
-                currentBinlogPosition = DO_NOT_SET;
-            }
-        } else {
-            currentBinlogPosition = -1;
-        }
-
-        // Set current gtid to whatever is in State, falling back to the Retrieve All Records then Initial Gtid if no State variable is present
-        currentGtidSet = stateMap.get(BinlogEventInfo.BINLOG_GTIDSET_KEY);
-        if (currentGtidSet == null) {
-            if (!getAllRecords) {
-                if (context.getProperty(INIT_GTID).isSet()) {
+        if (useGtid) {
+            // Set current gtid to whatever is in State, falling back to the Retrieve All Records then Initial Gtid if no State variable is present
+            currentGtidSet = stateMap.get(BinlogEventInfo.BINLOG_GTIDSET_KEY);
+            if (currentGtidSet == null) {
+                if (!getAllRecords && context.getProperty(INIT_GTID).isSet()) {
                     currentGtidSet = context.getProperty(INIT_GTID).evaluateAttributeExpressions().getValue();
+                } else {
+                    // If we're starting from the beginning of all binlogs, the binlog gtid must be the empty string (not null)
+                    currentGtidSet = "";
+                }
+            }
+            currentBinlogFile = "";
+            currentBinlogPosition = DO_NOT_SET;
+        } else {
+            // Set current binlog filename to whatever is in State, falling back to the Retrieve All Records then Initial Binlog Filename if no State variable is present
+            currentBinlogFile = stateMap.get(BinlogEventInfo.BINLOG_FILENAME_KEY);
+            if (currentBinlogFile == null) {
+                if (!getAllRecords) {
+                    if (context.getProperty(INIT_BINLOG_FILENAME).isSet()) {
+                        currentBinlogFile = context.getProperty(INIT_BINLOG_FILENAME).evaluateAttributeExpressions().getValue();
+                    }
+                } else {
+                    // If we're starting from the beginning of all binlogs, the binlog filename must be the empty string (not null)
+                    currentBinlogFile = "";
+                }
+            }
+
+            // Set current binlog position to whatever is in State, falling back to the Retrieve All Records then Initial Binlog Filename if no State variable is present
+            String binlogPosition = stateMap.get(BinlogEventInfo.BINLOG_POSITION_KEY);
+            if (binlogPosition != null) {
+                currentBinlogPosition = Long.valueOf(binlogPosition);
+            } else if (!getAllRecords) {
+                if (context.getProperty(INIT_BINLOG_POSITION).isSet()) {
+                    currentBinlogPosition = context.getProperty(INIT_BINLOG_POSITION).evaluateAttributeExpressions().asLong();
+                } else {
+                    currentBinlogPosition = DO_NOT_SET;
                 }
             } else {
-                // If we're starting from the beginning of all binlogs, the binlog gtid must be the empty string (not null)
-                currentGtidSet = "";
+                currentBinlogPosition = -1;
             }
         }
 
@@ -731,14 +733,8 @@ public class CaptureChangeMySQL extends AbstractSessionFactoryProcessor {
                 binlogClient.setBinlogPosition(currentBinlogPosition);
             }
 
-            if (useGtid) {
-                binlogClient.setBinlogFilename("");
-                binlogClient.setGtidSet(currentGtidSet);
-                binlogClient.setGtidSetFallbackToPurged(true);
-            } else {
-                binlogClient.setBinlogFilename(currentBinlogFile);
-                binlogClient.setGtidSet(null);
-            }
+            binlogClient.setGtidSet(currentGtidSet);
+            binlogClient.setGtidSetFallbackToPurged(true);
 
             if (serverId != null) {
                 binlogClient.setServerId(serverId);
@@ -794,7 +790,7 @@ public class CaptureChangeMySQL extends AbstractSessionFactoryProcessor {
             // We always get ROTATE and FORMAT_DESCRIPTION messages no matter where we start (even from the end), and they won't have the correct "next position" value, so only
             // advance the position if it is not that type of event. ROTATE events don't generate output CDC events and have the current binlog position in a special field, which
             // is filled in during the ROTATE case
-            if (eventType != ROTATE && eventType != FORMAT_DESCRIPTION) {
+            if (eventType != ROTATE && eventType != FORMAT_DESCRIPTION && !useGtid) {
                 currentBinlogPosition = header.getPosition();
             }
             log.debug("Got message event type: {} ", new Object[]{header.getEventType().toString()});
@@ -978,17 +974,21 @@ public class CaptureChangeMySQL extends AbstractSessionFactoryProcessor {
                     break;
 
                 case ROTATE:
-                    // Update current binlog filename
-                    RotateEventData rotateEventData = event.getData();
-                    currentBinlogFile = rotateEventData.getBinlogFilename();
-                    currentBinlogPosition = rotateEventData.getBinlogPosition();
+                    if (!useGtid) {
+                        // Update current binlog filename
+                        RotateEventData rotateEventData = event.getData();
+                        currentBinlogFile = rotateEventData.getBinlogFilename();
+                        currentBinlogPosition = rotateEventData.getBinlogPosition();
+                    }
                     break;
 
                 case GTID:
                     // Update current binlog gtid
-                    GtidEventData gtidEventData = event.getData();
-                    gtidSet.add(gtidEventData.getGtid());
-                    currentGtidSet = gtidSet.toString();
+                    if (useGtid) {
+                        GtidEventData gtidEventData = event.getData();
+                        gtidSet.add(gtidEventData.getGtid());
+                        currentGtidSet = gtidSet.toString();
+                    }
                     break;
 
                 default:
@@ -998,7 +998,7 @@ public class CaptureChangeMySQL extends AbstractSessionFactoryProcessor {
             // Advance the current binlog position. This way if no more events are received and the processor is stopped, it will resume after the event that was just processed.
             // We always get ROTATE and FORMAT_DESCRIPTION messages no matter where we start (even from the end), and they won't have the correct "next position" value, so only
             // advance the position if it is not that type of event.
-            if (eventType != ROTATE && eventType != FORMAT_DESCRIPTION) {
+            if (eventType != ROTATE && eventType != FORMAT_DESCRIPTION && !useGtid) {
                 currentBinlogPosition = header.getNextPosition();
             }
         }
